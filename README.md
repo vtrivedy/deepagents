@@ -324,6 +324,28 @@ agent = create_deep_agent(
 )
 ```
 
+**Filesystem and Shell Combinations**:
+
+DeepAgents supports four combinations of filesystem and shell execution:
+
+1. **Virtual filesystem + No shell** (default) - Safest, all state in memory
+2. **Virtual filesystem + Sandbox shell** (`use_sandbox_shell=True`) - Commands run in Modal sandboxes
+3. **Local filesystem + Local shell** (`use_local_filesystem=True`) - Full disk access, local execution
+4. **Local filesystem + Sandbox shell** (`use_sandbox_shell_with_local_fs=True`) - Read/write real files, execute in sandboxes
+
+Example of combination #4 (local files + sandbox execution):
+```python
+agent = create_deep_agent(
+    use_sandbox_shell_with_local_fs=True,  # Local files, sandboxed commands
+    sandbox_config={
+        "pip_packages": ["pytest", "black"],
+        "apt_packages": ["git"],
+    }
+)
+```
+
+This is useful for: "Edit my local Python files, but run tests in a clean isolated environment."
+
 Notes:
 - Local filesystem mode injects `ls`, `read_file`, `write_file`, `edit_file`, plus `glob` and `grep` (ripgrep-powered) for discovery/search.
 - Long-term memory is not supported in local mode; attempting to set both `use_local_filesystem=True` and `use_longterm_memory=True` raises a ValueError.

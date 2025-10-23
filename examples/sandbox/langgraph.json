@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "sandbox": "./sandbox_agent.py:agent"
+  },
+  "env": ".env"
+}

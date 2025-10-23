@@ -208,3 +208,10 @@ __marimo__/
 
 # LangGraph
 .langgraph_api
+
+#claude
+.claude/
+
+#modal
+modal_sandbox_docs/
+modal_experiments.md

@@ -13,6 +13,10 @@ dependencies = [
     "langchain-anthropic>=1.0.0,<2.0.0",
     "langchain>=1.0.0,<2.0.0",
     "langchain-core>=1.0.0,<2.0.0",
+    "modal==1.2.0",
+    "langchain-openai>=1.0.0",
+    "textual>=6.4.0",
+    "prompt-toolkit>=3.0.52",
 ]
 
 [project.scripts]

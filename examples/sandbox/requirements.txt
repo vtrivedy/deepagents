@@ -1,0 +1,6 @@
+deepagents
+langchain-openai
+python-dotenv
+modal==1.2.0
+textual>=0.89.0
+prompt-toolkit>=3.0.47

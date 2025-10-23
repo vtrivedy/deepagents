@@ -53,6 +53,9 @@ def create_deep_agent(
     memory_backend: Any | None = None,
     use_longterm_memory: bool = False,
     use_local_filesystem: bool = False,
+    use_sandbox_shell: bool = False,
+    use_sandbox_shell_with_local_fs: bool = False,
+    sandbox_config: dict[str, Any] | None = None,
     long_term_memory: bool = False,
     skills: list[dict[str, Any]] | None = None,
     interrupt_on: dict[str, bool | InterruptOnConfig] | None = None,
@@ -94,6 +97,24 @@ def create_deep_agent(
             When True, longterm memory is not supported and `use_longterm_memory` must be False.
             Skills are automatically discovered from ~/.deepagents/skills/ and ./.deepagents/skills/.
             The agent_name for memory storage can be passed via config: {"configurable": {"agent_name": "myagent"}}.
+            Cannot be used with use_sandbox_shell=True or use_sandbox_shell_with_local_fs=True.
+        use_sandbox_shell: If True, replaces shell tool with Modal sandbox execution using virtual filesystem.
+            Provides secure, isolated command execution in Modal sandboxes.
+            Cannot be used with use_local_filesystem=True or use_sandbox_shell_with_local_fs=True.
+        use_sandbox_shell_with_local_fs: If True, combines local filesystem with Modal sandbox shell.
+            Allows agent to read/write real files while executing commands in isolated sandboxes.
+            Cannot be used with use_local_filesystem=True or use_sandbox_shell=True.
+        sandbox_config: Configuration dict for SandboxShellMiddleware. Options include:
+            - pip_packages: list[str] - Python packages to install (e.g., ["pytest", "black"])
+            - apt_packages: list[str] - System packages to install (e.g., ["git", "curl"])
+            - sync_cwd: bool - Auto-sync current working directory to sandbox
+            - sync_paths: list[str] - Specific paths to sync to sandbox
+            - sync_exclude: list[str] - Patterns to exclude from sync (e.g., [".git", "*.pyc"])
+            - custom_image: modal.Image - Override with fully custom Modal image (advanced)
+            - image_config: dict - Declarative image config with "base", "pip_packages", "apt_packages", "commands"
+            - timeout: int - Sandbox timeout in seconds (default: 3600)
+            - idle_timeout: int | None - Auto-termination idle timeout in seconds (default: 300)
+            - verbose: bool - Show Rich notifications (default: True)
         long_term_memory: If True, enables long-term memory features like agent.md persistence
             and memories folder. Only applies when use_local_filesystem=True.
         skills: Optional list of SkillDefinition for virtual filesystem mode. Only valid when
@@ -117,14 +138,48 @@ def create_deep_agent(
             "To use custom skills, set use_local_filesystem=False."
         )
 
+    # Validate shell mode combinations
+    shell_modes = [use_local_filesystem, use_sandbox_shell, use_sandbox_shell_with_local_fs]
+    if sum(shell_modes) > 1:
+        raise ValueError(
+            "Cannot use multiple shell modes simultaneously. "
+            "Choose one: use_local_filesystem, use_sandbox_shell, or use_sandbox_shell_with_local_fs."
+        )
+
     # Choose filesystem middleware kind
     def _fs_middleware() -> list[AgentMiddleware]:
+        # NEW: Local filesystem + Sandbox shell (4th combination)
+        if use_sandbox_shell_with_local_fs:
+            from deepagents.middleware.sandbox_shell import SandboxShellMiddleware
+
+            config = sandbox_config or {}
+            sandbox_middleware = SandboxShellMiddleware(**config)
+            return [LocalFilesystemMiddleware(long_term_memory=long_term_memory), sandbox_middleware]
+
+        # EXISTING: Local filesystem + Local shell
         if use_local_filesystem:
             shell_middleware = ShellToolMiddleware(
                 workspace_root=os.getcwd(),
                 execution_policy=HostExecutionPolicy()
             )
             return [LocalFilesystemMiddleware(long_term_memory=long_term_memory), shell_middleware]
+
+        # EXISTING: Virtual filesystem + Sandbox shell
+        if use_sandbox_shell:
+            from deepagents.middleware.sandbox_shell import SandboxShellMiddleware
+
+            config = sandbox_config or {}
+            sandbox_middleware = SandboxShellMiddleware(**config)
+            return [
+                FilesystemMiddleware(
+                    long_term_memory=use_longterm_memory,
+                    memory_backend=memory_backend,
+                    skills=skills
+                ),
+                sandbox_middleware,
+            ]
+
+        # EXISTING: Virtual filesystem + No shell (default)
         return [FilesystemMiddleware(
             long_term_memory=use_longterm_memory,
             memory_backend=memory_backend,
