@@ -2,12 +2,17 @@
 """Minimalist prompt-toolkit TUI for DeepAgents sandbox chat.
 
 Beautiful emerald green theme with streaming responses.
-Press Ctrl+C or Ctrl+D to quit.
+
+Controls:
+- Enter: Submit message
+- Alt-Enter (or Esc then Enter): New line for multiline input
+- Ctrl+C or Ctrl+D: Quit
 """
 
 import asyncio
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.spinner import Spinner
@@ -226,9 +231,32 @@ async def main():
     console.print("\n... Ready to code! What would you like to build?", style=COLORS["agent"])
     console.print()
 
-    # Setup prompt session
+    # One-time hint for multiline input
+    console.print("  Tip: Alt-Enter for newline, Enter to submit", style=f"dim {COLORS['dim']}")
+
+    # Setup key bindings for multiline input
+    kb = KeyBindings()
+
+    @kb.add('enter')
+    def _(event):
+        buffer = event.current_buffer
+        if buffer.text.strip():  # Only submit if buffer has content
+            buffer.validate_and_handle()
+        # else: do nothing - no newline, no submission
+
+    @kb.add('escape', 'enter')  # Alt-Enter (or Esc then Enter) for newline
+    def _(event):
+        event.current_buffer.insert_text('\n')
+
+    # Setup prompt session with multiline support
     style = Style.from_dict({"prompt": COLORS["user"]})
-    session = PromptSession(message="> ", style=style)
+    session = PromptSession(
+        message="> ",
+        style=style,
+        multiline=True,
+        prompt_continuation=lambda width, line_number, is_soft_wrap: "  ",
+        key_bindings=kb,
+    )
 
     # Main chat loop
     while True:
