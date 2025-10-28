@@ -1,0 +1,2 @@
+fix startup screen layout
+- Fixed screen height by adding reserve_space_for_menu=0 to PromptSession. Moved console.clear() before create_model() to prevent double banner. Moved model info display from create_model() to simple_cli() and positioned it before working directory line by inspecting model.model_name or model.model attribute.
