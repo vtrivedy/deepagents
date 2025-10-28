@@ -9,11 +9,8 @@ dependencies = [
     "langchain-anthropic>=1.0.0,<2.0.0",
     "langchain>=1.0.2,<2.0.0",
     "langchain-core>=1.0.0,<2.0.0",
+    "langgraph>=1.0.0,<2.0.0",
     "wcmatch",
-            "tavily-python",
-    "python-dotenv",
-    "requests",
-    "rich>=13.0.0",
 ]
 
 [project.scripts]
@@ -26,6 +23,12 @@ dev = [
     "build",
     "twine",
     "langchain-openai",
+]
+cli = [
+    "tavily-python",
+    "python-dotenv",
+    "requests",
+    "rich>=13.0.0",
 ]
 
 [dependency-groups]

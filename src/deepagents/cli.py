@@ -1,4 +1,44 @@
 #!/usr/bin/env python3
+import sys
+
+# Check for CLI dependencies before importing them
+def check_cli_dependencies():
+    """Check if CLI optional dependencies are installed."""
+    missing = []
+    
+    try:
+        import rich
+    except ImportError:
+        missing.append("rich")
+    
+    try:
+        import requests
+    except ImportError:
+        missing.append("requests")
+    
+    try:
+        import dotenv
+    except ImportError:
+        missing.append("python-dotenv")
+    
+    try:
+        import tavily
+    except ImportError:
+        missing.append("tavily-python")
+    
+    if missing:
+        print("\n❌ Missing required CLI dependencies!")
+        print(f"\nThe following packages are required to use the deepagents CLI:")
+        for pkg in missing:
+            print(f"  - {pkg}")
+        print(f"\nPlease install them with:")
+        print(f"  pip install deepagents[cli]")
+        print(f"\nOr install all dependencies:")
+        print(f"  pip install 'deepagents[cli]'")
+        sys.exit(1)
+
+check_cli_dependencies()
+
 import argparse
 import asyncio
 import os
