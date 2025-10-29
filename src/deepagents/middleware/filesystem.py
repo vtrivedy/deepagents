@@ -213,7 +213,7 @@ Examples:
 - Search Python files only: `grep(pattern="import", glob="*.py")`
 - Show matching lines: `grep(pattern="error", output_mode="content")`"""
 
-FILESYSTEM_SYSTEM_PROMPT = """## Filesystem Tools `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`
+FILESYSTEM_SYSTEM_PROMPT = """## Filesystem Tools `ls`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`, `bash`
 
 You have access to a filesystem which you can interact with using these tools.
 All file paths must start with a /.
@@ -223,7 +223,8 @@ All file paths must start with a /.
 - write_file: write to a file in the filesystem
 - edit_file: edit a file in the filesystem
 - glob: find files matching a pattern (e.g., "**/*.py")
-- grep: search for text within files"""
+- grep: search for text within files
+- bash: execute shell commands in sandbox environments (when available)"""
 
 
 def _get_backend(backend: BACKEND_TYPES, runtime: ToolRuntime) -> BackendProtocol:
@@ -429,6 +430,46 @@ def _grep_tool_generator(
     return grep
 
 
+def _bash_tool_generator(
+    backend: BackendProtocol | Callable[[ToolRuntime], BackendProtocol],
+    custom_description: str | None = None,
+) -> BaseTool:
+    """Generate the bash tool for backends that support execution.
+
+    Args:
+        backend: Backend to use for command execution, or a factory function.
+        custom_description: Optional custom description for the tool.
+
+    Returns:
+        Configured bash tool that executes commands in sandboxes with execute() method.
+    """
+    tool_description = custom_description or """Execute a bash command in the sandbox container. Use this to run Python scripts, shell commands, or any executable code.
+
+Args:
+    command: The bash command to execute (e.g., 'python /workspace/script.py', 'ls -la', 'cat file.txt')
+
+Returns:
+    The stdout from the command execution, or an error message if the command failed."""
+
+    @tool(description=tool_description)
+    def bash(command: str, runtime: ToolRuntime[None, FilesystemState]) -> str:
+        resolved_backend = _get_backend(backend, runtime)
+
+        # Check if backend supports execution
+        if not hasattr(resolved_backend, 'execute') or not callable(getattr(resolved_backend, 'execute')):
+            return "Error: This backend doesn't support command execution"
+
+        try:
+            result = resolved_backend.execute(command, cwd="/workspace")
+            if result["exit_code"] != 0:
+                return f"Command failed with exit code {result['exit_code']}:\nstderr: {result['stderr']}\nstdout: {result['stdout']}"
+            return result["stdout"]
+        except (NotImplementedError, AttributeError):
+            return "Error: This backend doesn't support command execution"
+
+    return bash
+
+
 TOOL_GENERATORS = {
     "ls": _ls_tool_generator,
     "read_file": _read_file_tool_generator,
@@ -436,7 +477,26 @@ TOOL_GENERATORS = {
     "edit_file": _edit_file_tool_generator,
     "glob": _glob_tool_generator,
     "grep": _grep_tool_generator,
+    "bash": _bash_tool_generator,
 }
+
+
+def _backend_supports_execution(backend: BACKEND_TYPES) -> bool:
+    """Check if a backend supports command execution.
+
+    Args:
+        backend: Backend instance or factory to check.
+
+    Returns:
+        True if backend supports execute(), False otherwise.
+    """
+    # If it's a factory, we can't check easily - assume it might support it
+    # and let the bash tool handle the runtime check
+    if callable(backend):
+        return True  # Conservative - include bash tool, it will handle errors
+
+    # Direct backend instance - check for execute method
+    return hasattr(backend, 'execute') and callable(getattr(backend, 'execute', None))
 
 
 def _get_filesystem_tools(
@@ -450,12 +510,16 @@ def _get_filesystem_tools(
         custom_tool_descriptions: Optional custom descriptions for tools.
 
     Returns:
-        List of configured filesystem tools (ls, read_file, write_file, edit_file, glob, grep).
+        List of configured filesystem tools (ls, read_file, write_file, edit_file, glob, grep, and bash if supported).
     """
     if custom_tool_descriptions is None:
         custom_tool_descriptions = {}
     tools = []
     for tool_name, tool_generator in TOOL_GENERATORS.items():
+        # Skip bash tool if backend doesn't support execution
+        if tool_name == "bash" and not _backend_supports_execution(backend):
+            continue
+
         tool = tool_generator(backend, custom_tool_descriptions.get(tool_name))
         tools.append(tool)
     return tools

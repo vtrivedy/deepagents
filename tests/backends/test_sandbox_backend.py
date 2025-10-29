@@ -1,21 +1,23 @@
-"""Tests for SandboxBackend and providers"""
+"""Tests for Sandbox providers"""
 
 import pytest
 from unittest.mock import AsyncMock, Mock, patch
 from deepagents.backends.sandbox import (
-    SandboxBackend,
     SandboxConfig,
     DaytonaProvider,
+    ExecutionResult,
+    FileMetadata,
 )
-from deepagents.backends.sandbox.protocol import ExecutionResult, FileMetadata
+from deepagents.backends.sandbox.providers.modal_sandbox import ModalSandboxProvider
 
 
 class MockSandboxProvider:
-    """Mock provider for testing SandboxBackend"""
+    """Mock provider for testing (implements BackendProtocol)"""
 
     def __init__(self):
         self.files = {}
 
+    # Async methods (sandbox-specific)
     async def read_file(self, path: str) -> bytes:
         if path in self.files:
             return self.files[path]
@@ -64,17 +66,78 @@ class MockSandboxProvider:
         # Simple mock execution
         return {"stdout": "mock output", "stderr": "", "exit_code": 0}
 
+    async def cleanup(self) -> None:
+        """Cleanup mock provider"""
+        self.files.clear()
 
-class TestSandboxBackend:
-    """Test SandboxBackend implementation"""
+    # BackendProtocol methods (sync wrappers)
+    def _run_async(self, coro):
+        """Run async coroutine in sync context"""
+        import asyncio
+        loop = asyncio.new_event_loop()
+        result = loop.run_until_complete(coro)
+        loop.close()
+        return result
+
+    def ls_info(self, path: str):
+        from deepagents.backends.utils import FileInfo
+        files = self._run_async(self.list_files(path, recursive=False))
+        return [FileInfo(**f) for f in files]
+
+    def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> str:
+        from deepagents.backends.utils import format_content_with_line_numbers
+        try:
+            content_bytes = self._run_async(self.read_file(file_path))
+            content = content_bytes.decode("utf-8")
+        except Exception as e:
+            return f"Error: Could not read file '{file_path}': {str(e)}"
+        lines = content.split("\n")[offset:offset+limit]
+        return format_content_with_line_numbers(lines, offset + 1)
+
+    def write(self, file_path: str, content: str):
+        from deepagents.backends.protocol import WriteResult
+        try:
+            self._run_async(self.write_file(file_path, content.encode("utf-8")))
+            return WriteResult(path=file_path, files_update=None)
+        except Exception as e:
+            return WriteResult(error=str(e))
+
+    def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False):
+        from deepagents.backends.protocol import EditResult
+        from deepagents.backends.utils import perform_string_replacement
+        try:
+            content_bytes = self._run_async(self.read_file(file_path))
+            content = content_bytes.decode("utf-8")
+        except Exception as e:
+            return EditResult(error=f"Error: Could not read file '{file_path}': {str(e)}")
+
+        result = perform_string_replacement(content, old_string, new_string, replace_all)
+        if isinstance(result, str):
+            return EditResult(error=result)
+
+        new_content, num_replacements = result
+        try:
+            self._run_async(self.write_file(file_path, new_content.encode("utf-8")))
+            return EditResult(path=file_path, files_update=None, occurrences=int(num_replacements))
+        except Exception as e:
+            return EditResult(error=str(e))
+
+    def grep_raw(self, pattern: str, path=None, glob=None):
+        return []  # Mock implementation
+
+    def glob_info(self, pattern: str, path: str = "/"):
+        return []  # Mock implementation
+
+
+class TestMockProvider:
+    """Test mock provider (using BackendProtocol)"""
 
     def test_read_file_success(self):
-        """Test reading a file from sandbox"""
+        """Test reading a file from provider"""
         provider = MockSandboxProvider()
         provider.files["/workspace/test.txt"] = b"line1\nline2\nline3"
 
-        backend = SandboxBackend(provider)
-        result = backend.read("/workspace/test.txt")
+        result = provider.read("/workspace/test.txt")
 
         assert "line1" in result
         assert "line2" in result
@@ -83,18 +146,16 @@ class TestSandboxBackend:
     def test_read_file_not_found(self):
         """Test reading a non-existent file"""
         provider = MockSandboxProvider()
-        backend = SandboxBackend(provider)
 
-        result = backend.read("/workspace/missing.txt")
+        result = provider.read("/workspace/missing.txt")
         assert "Error" in result
         assert "Could not read file" in result
 
     def test_write_file_success(self):
-        """Test writing a file to sandbox"""
+        """Test writing a file to provider"""
         provider = MockSandboxProvider()
-        backend = SandboxBackend(provider)
 
-        result = backend.write("/workspace/new.txt", "Hello World")
+        result = provider.write("/workspace/new.txt", "Hello World")
 
         assert result.error is None
         assert result.path == "/workspace/new.txt"
@@ -102,12 +163,11 @@ class TestSandboxBackend:
         assert provider.files["/workspace/new.txt"] == b"Hello World"
 
     def test_edit_file_success(self):
-        """Test editing a file in sandbox"""
+        """Test editing a file in provider"""
         provider = MockSandboxProvider()
         provider.files["/workspace/test.txt"] = b"Hello World"
 
-        backend = SandboxBackend(provider)
-        result = backend.edit("/workspace/test.txt", "World", "Universe", False)
+        result = provider.edit("/workspace/test.txt", "World", "Universe", False)
 
         assert result.error is None
         assert result.path == "/workspace/test.txt"
@@ -117,9 +177,8 @@ class TestSandboxBackend:
     def test_edit_file_not_found(self):
         """Test editing a non-existent file"""
         provider = MockSandboxProvider()
-        backend = SandboxBackend(provider)
 
-        result = backend.edit("/workspace/missing.txt", "old", "new", False)
+        result = provider.edit("/workspace/missing.txt", "old", "new", False)
         assert result.error is not None
         assert "Could not read file" in result.error
 
@@ -129,8 +188,7 @@ class TestSandboxBackend:
         provider.files["/workspace/file1.txt"] = b"content1"
         provider.files["/workspace/file2.txt"] = b"content2"
 
-        backend = SandboxBackend(provider)
-        files = backend.ls_info("/workspace/")
+        files = provider.ls_info("/workspace/")
 
         assert len(files) == 2
         paths = [f["path"] for f in files]

@@ -1,27 +1,30 @@
 """Sandbox backend for remote code execution"""
 
-from deepagents.backends.sandbox.protocol import (
-    SandboxProvider,
-    SandboxConfig,
-    BootstrapConfig,
+from deepagents.backends.protocol import BackendProtocol
+
+# Import types FIRST (before providers to avoid circular import)
+from deepagents.backends.sandbox.types import (
     ExecutionResult,
     FileMetadata,
+    BootstrapConfig,
+    SandboxConfig,
 )
-from deepagents.backends.sandbox.backend import SandboxBackend
+
+# Now import providers (they can import from types.py without circular dependency)
 from deepagents.backends.sandbox.providers import (
     ModalSandboxProvider,
     DaytonaProvider,
 )
 
 
-def create_sandbox_provider(config: SandboxConfig) -> SandboxProvider:
+def create_sandbox_provider(config: SandboxConfig) -> BackendProtocol:
     """Factory: creates the appropriate sandbox provider based on config.
 
     Args:
         config: SandboxConfig with provider field set to "modal" or "daytona".
 
     Returns:
-        SandboxProvider instance of the appropriate type
+        BackendProtocol instance (ModalSandboxProvider or DaytonaProvider)
 
     Raises:
         ValueError: If provider is unknown
@@ -29,7 +32,7 @@ def create_sandbox_provider(config: SandboxConfig) -> SandboxProvider:
     Example:
         config = SandboxConfig(provider="modal")
         provider = create_sandbox_provider(config)
-        backend = SandboxBackend(provider)
+        # provider now implements BackendProtocol + has execute() method
     """
     if config.provider == "modal":
         return ModalSandboxProvider.from_config(config)
@@ -45,12 +48,10 @@ def create_sandbox_provider(config: SandboxConfig) -> SandboxProvider:
 
 
 __all__ = [
-    "SandboxProvider",
     "SandboxConfig",
     "BootstrapConfig",
     "ExecutionResult",
     "FileMetadata",
-    "SandboxBackend",
     "create_sandbox_provider",
     "ModalSandboxProvider",
     "DaytonaProvider",

@@ -7,7 +7,6 @@ from langchain.tools import ToolRuntime
 from deepagents.backends.protocol import BackendProtocol, BackendFactory, WriteResult, EditResult
 from deepagents.backends.state import StateBackend
 from deepagents.backends.utils import FileInfo, GrepMatch
-from deepagents.backends.protocol import BackendFactory
 
 
 class CompositeBackend:
@@ -219,5 +218,43 @@ class CompositeBackend:
                 pass
         return res
 
+    def execute(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Execute command by routing to backend that supports it.
 
- 
+        Routes based on cwd path. If no cwd specified or no matching route,
+        tries default backend.
+
+        Args:
+            command: Command to execute
+            cwd: Working directory path (used for routing)
+            env: Environment variables
+
+        Returns:
+            ExecutionResult dict with stdout, stderr, exit_code
+
+        Raises:
+            NotImplementedError: If no backend supports command execution
+        """
+        # Route based on cwd path
+        if cwd:
+            for prefix, backend in self.sorted_routes:
+                if cwd.startswith(prefix):
+                    if hasattr(backend, 'execute') and callable(getattr(backend, 'execute', None)):
+                        return backend.execute(command, cwd, env)
+                    raise NotImplementedError(
+                        f"Backend for '{prefix}' doesn't support command execution"
+                    )
+
+        # Try default backend
+        if hasattr(self.default, 'execute') and callable(getattr(self.default, 'execute', None)):
+            return self.default.execute(command, cwd, env)
+
+        raise NotImplementedError("No backend supports command execution")
+
+
+

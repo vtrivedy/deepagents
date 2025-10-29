@@ -9,9 +9,7 @@ from deepagents.backends.protocol import BackendProtocol
 # Sandbox is optional - only import if needed
 try:
     from deepagents.backends.sandbox import (
-        SandboxBackend,
         SandboxConfig,
-        SandboxProvider,
         ModalSandboxProvider,
         DaytonaProvider,
     )
@@ -29,9 +27,7 @@ __all__ = [
 
 if _SANDBOX_AVAILABLE:
     __all__.extend([
-        "SandboxBackend",
         "SandboxConfig",
-        "SandboxProvider",
         "ModalSandboxProvider",
         "DaytonaProvider",
     ])
