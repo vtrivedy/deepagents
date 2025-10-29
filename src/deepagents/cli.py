@@ -51,6 +51,7 @@ import os
 import platform
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Dict, Any, Union, Literal
 
@@ -61,7 +62,7 @@ from deepagents import create_deep_agent
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 from langchain.agents.middleware import HostExecutionPolicy, InterruptOnConfig
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import ToolMessage, HumanMessage
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -536,7 +537,7 @@ def show_interactive_help():
     console.print("  Alt+Enter       Insert newline (Option+Enter on Mac, or ESC then Enter)", style=COLORS["dim"])
     console.print("  Ctrl+E          Open in external editor (nano by default)", style=COLORS["dim"])
     console.print("  Arrow keys      Navigate input and history", style=COLORS["dim"])
-    console.print("  Ctrl+C          Cancel current input", style=COLORS["dim"])
+    console.print("  Ctrl+C          Cancel input or interrupt agent mid-work", style=COLORS["dim"])
     console.print()
     console.print("[bold]Special Features:[/bold]", style=COLORS["primary"])
     console.print("  @filename       Type @ to auto-complete files and inject content", style=COLORS["dim"])
@@ -1088,6 +1089,20 @@ def execute_task(user_input: str, agent, assistant_id: str | None, token_tracker
         if spinner_active:
             status.stop()
         console.print("\n[yellow]Interrupted by user[/yellow]\n")
+
+        # Inform the agent in background thread (non-blocking)
+        def notify_agent():
+            try:
+                agent.update_state(
+                    config=config,
+                    values={
+                        "messages": [HumanMessage(content="[User interrupted the previous request with Ctrl+C]")]
+                    }
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=notify_agent, daemon=True).start()
         return
 
     if spinner_active:
@@ -1120,7 +1135,7 @@ async def simple_cli(agent, assistant_id: str | None):
     console.print("... Ready to code! What would you like to build?", style=COLORS["agent"])
     console.print(f"  [dim]Working directory: {Path.cwd()}[/dim]")
     console.print()
-    console.print(f"  Tips: Enter to submit, Alt+Enter for newline, Ctrl+E for editor, /help for commands", style=f"dim {COLORS['dim']}")
+    console.print(f"  Tips: Enter to submit, Alt+Enter for newline, Ctrl+E for editor, Ctrl+C to interrupt, /help for commands", style=f"dim {COLORS['dim']}")
     console.print()
 
     # Create prompt session and token tracker
@@ -1134,7 +1149,8 @@ async def simple_cli(agent, assistant_id: str | None):
         except EOFError:
             break
         except KeyboardInterrupt:
-            console.print()
+            # Ctrl+C at prompt - exit the program
+            console.print(f"\n\nGoodbye!", style=COLORS["primary"])
             break
 
         if not user_input:
@@ -1363,7 +1379,22 @@ When you use the web_search tool:
 5. Cite your sources by mentioning page titles or URLs when relevant
 6. If the search doesn't find what you need, explain what you found and ask clarifying questions
 
-The user only sees your text responses - not tool results. Always provide a complete, natural language answer after using web_search."""
+The user only sees your text responses - not tool results. Always provide a complete, natural language answer after using web_search.
+
+### Todo List Management
+
+When using the write_todos tool:
+1. Keep the todo list MINIMAL - aim for 3-6 items maximum
+2. Only create todos for complex, multi-step tasks that truly need tracking
+3. Break down work into clear, actionable items without over-fragmenting
+4. For simple tasks (1-2 steps), just do them directly without creating todos
+5. When first creating a todo list for a task, ALWAYS ask the user if the plan looks good before starting work
+   - Create the todos, let them render, then ask: "Does this plan look good?" or similar
+   - Wait for the user's response before marking the first todo as in_progress
+   - If they want changes, adjust the plan accordingly
+6. Update todo status promptly as you complete each item
+
+The todo list is a planning tool - use it judiciously to avoid overwhelming the user with excessive task tracking."""
 
     # Configure human-in-the-loop for shell commands
     shell_interrupt_config: InterruptOnConfig = {
@@ -1387,8 +1418,6 @@ The user only sees your text responses - not tool results. Always provide a comp
     
     try:
         await simple_cli(agent, assistant_id)
-    except KeyboardInterrupt:
-        console.print(f"\n\nGoodbye!", style=COLORS["primary"])
     except Exception as e:
         console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
 
