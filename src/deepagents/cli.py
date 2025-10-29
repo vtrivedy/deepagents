@@ -46,18 +46,22 @@ check_cli_dependencies()
 
 import argparse
 import asyncio
+import json
 import os
-import subprocess
 import platform
-import requests
-from typing import Dict, Any, Union, Literal
+import shutil
+import subprocess
 from pathlib import Path
+from typing import Dict, Any, Union, Literal
+
+import requests
 
 from tavily import TavilyClient
 from deepagents import create_deep_agent
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
-from langchain.agents.middleware import ShellToolMiddleware, HostExecutionPolicy, InterruptOnConfig
+from langchain.agents.middleware import HostExecutionPolicy, InterruptOnConfig
+from langchain_core.messages import ToolMessage
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -66,8 +70,7 @@ from rich.spinner import Spinner
 from deepagents.backends.filesystem import FilesystemBackend
 from deepagents.backends import CompositeBackend
 from deepagents.middleware.agent_memory import AgentMemoryMiddleware
-from pathlib import Path
-import shutil
+from deepagents.middleware.resumable_shell import ResumableShellToolMiddleware
 from rich import box
 
 import dotenv
@@ -79,6 +82,9 @@ from prompt_toolkit.completion import Completer, PathCompleter, WordCompleter, m
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.enums import EditingMode
+from prompt_toolkit.application import Application
+from prompt_toolkit.layout import Layout, HSplit, Window, FormattedTextControl
+from prompt_toolkit.widgets import Frame
 
 dotenv.load_dotenv()
 
@@ -194,7 +200,33 @@ def web_search(
     topic: Literal["general", "news", "finance"] = "general",
     include_raw_content: bool = False,
 ):
-    """Search the web using Tavily for programming-related information."""
+    """Search the web using Tavily for current information and documentation.
+
+    This tool searches the web and returns relevant results. After receiving results,
+    you MUST synthesize the information into a natural, helpful response for the user.
+
+    Args:
+        query: The search query (be specific and detailed)
+        max_results: Number of results to return (default: 5)
+        topic: Search topic type - "general" for most queries, "news" for current events
+        include_raw_content: Include full page content (warning: uses more tokens)
+
+    Returns:
+        Dictionary containing:
+        - results: List of search results, each with:
+            - title: Page title
+            - url: Page URL
+            - content: Relevant excerpt from the page
+            - score: Relevance score (0-1)
+        - query: The original search query
+
+    IMPORTANT: After using this tool:
+    1. Read through the 'content' field of each result
+    2. Extract relevant information that answers the user's question
+    3. Synthesize this into a clear, natural language response
+    4. Cite sources by mentioning the page titles or URLs
+    5. NEVER show the raw JSON to the user - always provide a formatted response
+    """
     if tavily_client is None:
         return {
             "error": "Tavily API key not configured. Please set TAVILY_API_KEY environment variable.",
@@ -277,6 +309,24 @@ def truncate_value(value: str, max_length: int = MAX_ARG_LENGTH) -> str:
     return value
 
 
+def format_tool_message_content(content: Any) -> str:
+    """Convert ToolMessage content into a printable string."""
+    if content is None:
+        return ""
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            else:
+                try:
+                    parts.append(json.dumps(item))
+                except Exception:
+                    parts.append(str(item))
+        return "\n".join(parts)
+    return str(content)
+
+
 class TokenTracker:
     """Track token usage across the conversation."""
 
@@ -310,7 +360,7 @@ class TokenTracker:
 
 
 class FilePathCompleter(Completer):
-    """File path completer that triggers on @ symbol."""
+    """File path completer that triggers on @ symbol with case-insensitive matching."""
 
     def __init__(self):
         self.path_completer = PathCompleter(expanduser=True)
@@ -328,10 +378,26 @@ class FilePathCompleter(Completer):
                 # Create a document for just the path part
                 path_doc = Document(after_at, len(after_at))
 
-                # Get completions from PathCompleter
-                for completion in self.path_completer.get_completions(path_doc, complete_event):
-                    # PathCompleter already gives us the correct start_position
-                    # relative to the path_doc, which is what we want
+                # Get all completions from PathCompleter
+                all_completions = list(self.path_completer.get_completions(path_doc, complete_event))
+
+                # If user has typed something, filter case-insensitively
+                if after_at.strip():
+                    # Extract just the filename part for matching (not the full path)
+                    search_parts = after_at.split('/')
+                    search_term = search_parts[-1].lower() if search_parts else ""
+
+                    # Filter completions case-insensitively
+                    filtered_completions = [
+                        c for c in all_completions
+                        if search_term in c.text.lower()
+                    ]
+                else:
+                    # No search term, show all completions
+                    filtered_completions = all_completions
+
+                # Yield filtered completions
+                for completion in filtered_completions:
                     yield Completion(
                         text=completion.text,
                         start_position=completion.start_position,
@@ -667,7 +733,12 @@ def render_todo_list(todos: list[dict]) -> None:
 
 
 def prompt_for_shell_approval(action_request: dict) -> dict:
-    """Prompt user to approve/reject/edit a shell command."""
+    """Prompt user to approve/reject a shell command with arrow key navigation."""
+    import sys
+    import tty
+    import termios
+
+    # Display command info first
     console.print()
     console.print(Panel(
         f"[bold yellow]⚠️  Shell Command Requires Approval[/bold yellow]\n\n"
@@ -678,30 +749,92 @@ def prompt_for_shell_approval(action_request: dict) -> dict:
     ))
     console.print()
 
-    while True:
-        # Use input() instead of prompt() to avoid event loop conflicts
-        choice = input("[A]pprove  [E]dit  [R]eject: ").strip().lower()
+    options = ["approve", "reject"]
+    selected = 0  # Start with approve selected
 
-        if choice in ["a", "approve"]:
-            return {"type": "approve"}
-        elif choice in ["r", "reject"]:
-            message = input("Reason for rejection (optional): ").strip()
-            return {"type": "reject", "message": message or "User rejected the command"}
-        elif choice in ["e", "edit"]:
-            current_cmd = action_request['args'].get('command', '')
-            console.print(f"Current command: [cyan]{current_cmd}[/cyan]")
-            new_cmd = input("Edit command: ").strip()
-            if not new_cmd:
-                new_cmd = current_cmd  # Keep current if user enters nothing
-            return {
-                "type": "edit",
-                "edited_action": {
-                    "name": "shell",
-                    "args": {"command": new_cmd}
-                }
-            }
+    try:
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+
+        try:
+            tty.setraw(fd)
+
+            while True:
+                # Clear and redraw menu
+                sys.stdout.write('\r\033[K')  # Clear line
+
+                # Display options with ANSI color codes
+                for i, option in enumerate(options):
+                    if i == selected:
+                        if option == "approve":
+                            # Green bold with arrow
+                            sys.stdout.write('\033[1;32m→ ✓ Approve\033[0m')
+                        else:
+                            # Red bold with arrow
+                            sys.stdout.write('\033[1;31m→ ✗ Reject\033[0m')
+                    else:
+                        if option == "approve":
+                            # Dim white
+                            sys.stdout.write('\033[2m  ✓ Approve\033[0m')
+                        else:
+                            # Dim white
+                            sys.stdout.write('\033[2m  ✗ Reject\033[0m')
+
+                    if i < len(options) - 1:
+                        sys.stdout.write('  ')
+
+                sys.stdout.flush()
+
+                # Read key
+                char = sys.stdin.read(1)
+
+                if char == '\x1b':  # ESC sequence (arrow keys)
+                    next1 = sys.stdin.read(1)
+                    next2 = sys.stdin.read(1)
+                    if next1 == '[':
+                        if next2 == 'C':  # Right arrow
+                            selected = (selected + 1) % len(options)
+                        elif next2 == 'D':  # Left arrow
+                            selected = (selected - 1) % len(options)
+                        elif next2 == 'B':  # Down arrow
+                            selected = (selected + 1) % len(options)
+                        elif next2 == 'A':  # Up arrow
+                            selected = (selected - 1) % len(options)
+                elif char == '\r' or char == '\n':  # Enter
+                    sys.stdout.write('\n')
+                    break
+                elif char == '\x03':  # Ctrl+C
+                    sys.stdout.write('\n')
+                    raise KeyboardInterrupt()
+                elif char.lower() == 'a':
+                    selected = 0
+                    sys.stdout.write('\n')
+                    break
+                elif char.lower() == 'r':
+                    selected = 1
+                    sys.stdout.write('\n')
+                    break
+
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    except (termios.error, AttributeError):
+        # Fallback for non-Unix systems
+        console.print("  [bold green]✓ (A)pprove[/bold green]  (default)")
+        console.print("  [bold red]✗ (R)eject[/bold red]")
+        choice = input("\nChoice (A/R, default=Approve): ").strip().lower()
+        if choice == 'r' or choice == 'reject':
+            selected = 1
         else:
-            console.print("[yellow]Invalid choice. Please enter A, E, or R.[/yellow]")
+            selected = 0
+
+    console.print()
+
+    # Return decision based on selection
+    if selected == 0:
+        return {"type": "approve"}
+    else:
+        return {"type": "reject", "message": "User rejected the command"}
 
 
 def execute_task(user_input: str, agent, assistant_id: str | None, token_tracker: TokenTracker | None = None):
@@ -733,8 +866,6 @@ def execute_task(user_input: str, agent, assistant_id: str | None, token_tracker
     }
 
     has_responded = False
-    current_text = ""
-    printed_tool_calls_after_text = False
     captured_input_tokens = 0
     captured_output_tokens = 0
     current_todos = None  # Track current todo list state
@@ -760,186 +891,204 @@ def execute_task(user_input: str, agent, assistant_id: str | None, token_tracker
     # Stream input - may need to loop if there are interrupts
     stream_input = {"messages": [{"role": "user", "content": final_input}]}
 
-    while True:
-        interrupt_occurred = False
-        hitl_response = None
+    try:
+        while True:
+            interrupt_occurred = False
+            hitl_response = None
+            suppress_resumed_output = False
 
-        for chunk in agent.stream(
-            stream_input,
-            stream_mode="updates",  # Back to single mode like original
-            subgraphs=True,
-            config=config,
-            durability="exit",
-        ):
-            # Unpack chunk - with subgraphs=True, it's (namespace, stream_mode, data)
-            if isinstance(chunk, tuple) and len(chunk) == 3:
-                _, _, data = chunk  # namespace and stream_mode not needed for updates-only
-            elif isinstance(chunk, tuple) and len(chunk) == 2:
-                # Fallback for non-subgraph mode
-                _, data = chunk
-            else:
-                # Skip unexpected formats
-                continue
+            for chunk in agent.stream(
+                stream_input,
+                stream_mode=["messages", "updates"],  # Dual-mode for HITL support
+                subgraphs=True,
+                config=config,
+                durability="exit",
+            ):
+                # Unpack chunk - with subgraphs=True and dual-mode, it's (namespace, stream_mode, data)
+                if not isinstance(chunk, tuple) or len(chunk) != 3:
+                    continue
 
-            if not isinstance(data, dict):
-                continue
+                namespace, current_stream_mode, data = chunk
 
-            # Check for interrupts
-            if "__interrupt__" in data:
-                interrupt_data = data["__interrupt__"]
-                if interrupt_data:
-                    interrupt_obj = interrupt_data[0] if isinstance(interrupt_data, tuple) else interrupt_data
-                    hitl_request = interrupt_obj.value if hasattr(interrupt_obj, 'value') else interrupt_obj
+                # Handle UPDATES stream - for interrupts and todos
+                if current_stream_mode == "updates":
+                    if not isinstance(data, dict):
+                        continue
 
-                    # Stop spinner for approval prompt
-                    if spinner_active:
-                        status.stop()
-                        spinner_active = False
+                    # Check for interrupts
+                    if "__interrupt__" in data:
+                        interrupt_data = data["__interrupt__"]
+                        if interrupt_data:
+                            interrupt_obj = interrupt_data[0] if isinstance(interrupt_data, tuple) else interrupt_data
+                            hitl_request = interrupt_obj.value if hasattr(interrupt_obj, 'value') else interrupt_obj
 
-                    # Handle human-in-the-loop approval
-                    decisions = []
-                    for action_request in hitl_request.get("action_requests", []):
-                        decision = prompt_for_shell_approval(action_request)
-                        decisions.append(decision)
+                            # Stop spinner for approval prompt
+                            if spinner_active:
+                                status.stop()
+                                spinner_active = False
 
-                    hitl_response = {"decisions": decisions}
-                    interrupt_occurred = True
-                    break
+                            # Handle human-in-the-loop approval
+                            decisions = []
+                            for action_request in hitl_request.get("action_requests", []):
+                                decision = prompt_for_shell_approval(action_request)
+                                decisions.append(decision)
 
-            # Extract chunk_data from updates
-            chunk_data = list(data.values())[0] if data else None
-            if not chunk_data:
-                continue
-
-            # Check for todo updates
-            if "todos" in chunk_data:
-                new_todos = chunk_data["todos"]
-                if new_todos != current_todos:
-                    current_todos = new_todos
-                    # Stop spinner before rendering todos
-                    if spinner_active:
-                        status.stop()
-                        spinner_active = False
-                    console.print()
-                    render_todo_list(new_todos)
-                    console.print()
-
-            # Check for messages in chunk_data
-            if "messages" not in chunk_data:
-                continue
-
-            last_message = chunk_data["messages"][-1]
-            message_role = getattr(last_message, "type", None)
-            message_content = getattr(last_message, "content", None)
-
-            # Skip tool results
-            if message_role == "tool":
-                continue
-
-            # Handle AI messages
-            if message_role == "ai":
-                # Extract token usage if available
-                if token_tracker:
-                    usage = getattr(last_message, 'usage_metadata', None)
-                    if not usage:
-                        response_metadata = getattr(last_message, 'response_metadata', {})
-                        usage = response_metadata.get('usage', None)
-
-                    if usage:
-                        input_toks = usage.get('input_tokens', 0)
-                        output_toks = usage.get('output_tokens', 0)
-                        if input_toks or output_toks:
-                            captured_input_tokens = max(captured_input_tokens, input_toks)
-                            captured_output_tokens = max(captured_output_tokens, output_toks)
-
-                # First, extract and display text content
-                text_content = ""
-
-                if isinstance(message_content, str):
-                    text_content = message_content
-                elif isinstance(message_content, list):
-                    for block in message_content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            text_content = block.get("text", "")
+                            suppress_resumed_output = any(decision.get("type") == "reject" for decision in decisions)
+                            hitl_response = {"decisions": decisions}
+                            interrupt_occurred = True
                             break
 
-                if text_content.strip():
-                    if spinner_active:
-                        status.stop()
-                        spinner_active = False
+                    # Extract chunk_data from updates for todo checking
+                    chunk_data = list(data.values())[0] if data else None
+                    if chunk_data and isinstance(chunk_data, dict):
+                        # Check for todo updates
+                        if "todos" in chunk_data:
+                            new_todos = chunk_data["todos"]
+                            if new_todos != current_todos:
+                                current_todos = new_todos
+                                # Stop spinner before rendering todos
+                                if spinner_active:
+                                    status.stop()
+                                    spinner_active = False
+                                console.print()
+                                render_todo_list(new_todos)
+                                console.print()
 
-                    if not has_responded:
-                        console.print("● ", style=COLORS["agent"], end="", markup=False)
-                        has_responded = True
-                        printed_tool_calls_after_text = False
+                # Handle MESSAGES stream - for content and tool calls
+                elif current_stream_mode == "messages":
+                    # Messages stream returns (message, metadata) tuples
+                    if not isinstance(data, tuple) or len(data) != 2:
+                        continue
 
-                    if text_content != current_text:
-                        new_text = text_content[len(current_text):]
-                        console.print(new_text, style=COLORS["agent"], end="", markup=False)
-                        current_text = text_content
-                        printed_tool_calls_after_text = False
 
-                # Then, handle tool calls from tool_calls attribute
-                tool_calls = getattr(last_message, "tool_calls", None)
-                if tool_calls:
-                    # If we've printed text, ensure tool calls go on new line
-                    if has_responded and current_text and not printed_tool_calls_after_text:
-                        console.print()
-                        printed_tool_calls_after_text = True
+                    message, metadata = data
 
-                    for tool_call in tool_calls:
-                        tool_name = tool_call.get("name", "unknown")
-                        tool_args = tool_call.get("args", {})
+                    if isinstance(message, ToolMessage):
+                        # Tool results are sent to the agent, not displayed to users
+                        # Exception: show shell command errors to help with debugging
+                        tool_name = getattr(message, "name", "")
+                        tool_status = getattr(message, "status", "success")
 
-                        icon = tool_icons.get(tool_name, "🔧")
-                        args_str = ", ".join(
-                            f"{k}={truncate_value(str(v), 50)}" for k, v in tool_args.items()
-                        )
+                        if tool_name == "shell" and tool_status != "success":
+                            tool_content = format_tool_message_content(message.content)
+                            if tool_content:
+                                if spinner_active:
+                                    status.stop()
+                                    spinner_active = False
+                                console.print()
+                                console.print(tool_content, style="red")
+                                console.print()
 
-                        if spinner_active:
-                            status.stop()
-                        console.print(f"  {icon} {tool_name}({args_str})", style=f"dim {COLORS['tool']}")
-                        if spinner_active:
-                            status.start()
+                        # For all other tools (web_search, http_request, etc.),
+                        # results are hidden from user - agent will process and respond
+                        continue
 
-                # Handle tool calls from content blocks (alternative format) - only if not already handled
-                elif isinstance(message_content, list):
-                    has_tool_use = False
-                    for block in message_content:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            has_tool_use = True
-                            break
+                    # Check if this is an AIMessageChunk
+                    if not hasattr(message, 'content_blocks'):
+                        # Fallback for messages without content_blocks
+                        continue
 
-                    if has_tool_use:
-                        # If we've printed text, ensure tool calls go on new line
-                        if has_responded and current_text and not printed_tool_calls_after_text:
-                            console.print()
-                            printed_tool_calls_after_text = True
+                    # Extract token usage if available
+                    if token_tracker and hasattr(message, 'usage_metadata'):
+                        usage = message.usage_metadata
+                        if usage:
+                            input_toks = usage.get('input_tokens', 0)
+                            output_toks = usage.get('output_tokens', 0)
+                            if input_toks or output_toks:
+                                captured_input_tokens = max(captured_input_tokens, input_toks)
+                                captured_output_tokens = max(captured_output_tokens, output_toks)
 
-                        for block in message_content:
-                            if isinstance(block, dict) and block.get("type") == "tool_use":
-                                tool_name = block.get("name", "unknown")
-                                tool_input = block.get("input", {})
+                    # Process content blocks (this is the key fix!)
+                    for block in message.content_blocks:
+                        block_type = block.get("type")
 
+                        # Handle text blocks
+                        if block_type == "text":
+                            text = block.get("text", "")
+                            if text:
+                                if spinner_active:
+                                    status.stop()
+                                    spinner_active = False
+
+                                if not has_responded:
+                                    console.print("● ", style=COLORS["agent"], end="", markup=False)
+                                    has_responded = True
+
+                                # Print the text chunk directly (no cumulative diffing needed)
+                                console.print(text, style=COLORS["agent"], end="", markup=False)
+
+                        # Handle reasoning blocks
+                        elif block_type == "reasoning":
+                            reasoning = block.get("reasoning", "")
+                            if reasoning:
+                                if spinner_active:
+                                    status.stop()
+                                    spinner_active = False
+                                # Could display reasoning differently if desired
+                                # For now, skip it or handle minimally
+
+                        # Handle tool call chunks
+                        elif block_type == "tool_call_chunk":
+                            tool_name = block.get("name")
+                            tool_args = block.get("args", "")
+                            tool_id = block.get("id")
+
+                            # Only display when we have a complete tool call (name is present)
+                            if tool_name:
                                 icon = tool_icons.get(tool_name, "🔧")
-                                args = ", ".join(
-                                    f"{k}={truncate_value(str(v), 50)}" for k, v in tool_input.items()
-                                )
 
                                 if spinner_active:
                                     status.stop()
-                                console.print(f"  {icon} {tool_name}({args})", style=f"dim {COLORS['tool']}")
+
+                                # Display tool call
+                                if has_responded:
+                                    console.print()  # New line after text
+
+                                # Try to parse args if it's a string
+                                try:
+                                    if isinstance(tool_args, str) and tool_args:
+                                        parsed_args = json.loads(tool_args)
+                                        args_str = ", ".join(
+                                            f"{k}={truncate_value(str(v), 50)}"
+                                            for k, v in parsed_args.items()
+                                        )
+                                    else:
+                                        args_str = str(tool_args)
+                                except:
+                                    args_str = str(tool_args)
+
+                                console.print(f"  {icon} {tool_name}({args_str})", style=f"dim {COLORS['tool']}")
+
                                 if spinner_active:
                                     status.start()
 
-        # After streaming loop - handle interrupt if it occurred
-        if interrupt_occurred and hitl_response:
-            # Resume the agent with the human decision
-            stream_input = Command(resume=hitl_response)
-            # Continue the while loop to restream
-        else:
-            # No interrupt, break out of while loop
-            break
+            # After streaming loop - handle interrupt if it occurred
+            if interrupt_occurred and hitl_response:
+                if suppress_resumed_output:
+                    if spinner_active:
+                        status.stop()
+                        spinner_active = False
+                    try:
+                        agent.invoke(Command(resume=hitl_response), config=config)
+                    except Exception as err:
+                        console.print(f"[red]Error resuming after rejection: {err}[/red]")
+                    finally:
+                        console.print("\nCommand rejected. Returning to prompt.\n", style=COLORS["dim"])
+                    return
+
+                # Resume the agent with the human decision
+                stream_input = Command(resume=hitl_response)
+                # Continue the while loop to restream
+            else:
+                # No interrupt, break out of while loop
+                break
+
+    except KeyboardInterrupt:
+        # User pressed Ctrl+C - clean up and exit gracefully
+        if spinner_active:
+            status.stop()
+        console.print("\n[yellow]Interrupted by user[/yellow]\n")
+        return
 
     if spinner_active:
         status.stop()
@@ -1165,7 +1314,7 @@ async def main(assistant_id: str):
     if tavily_client is not None:
         tools.append(web_search)
 
-    shell_middleware = ShellToolMiddleware(
+    shell_middleware = ResumableShellToolMiddleware(
         workspace_root=os.getcwd(),
         execution_policy=HostExecutionPolicy()
     )
@@ -1192,7 +1341,29 @@ async def main(assistant_id: str):
     agent_middleware = [AgentMemoryMiddleware(backend=long_term_backend, memory_path="/memories/"), shell_middleware]
     system_prompt = f"""### Current Working Directory
 
-The filesystem backend is currently operating in: `{Path.cwd()}`"""
+The filesystem backend is currently operating in: `{Path.cwd()}`
+
+### Human-in-the-Loop Tool Approval
+
+Some tool calls require user approval before execution. When a tool call is rejected by the user:
+1. Accept their decision immediately - do NOT retry the same command
+2. Explain that you understand they rejected the action
+3. Suggest an alternative approach or ask for clarification
+4. Never attempt the exact same rejected command again
+
+Respect the user's decisions and work with them collaboratively.
+
+### Web Search Tool Usage
+
+When you use the web_search tool:
+1. The tool will return search results with titles, URLs, and content excerpts
+2. You MUST read and process these results, then respond naturally to the user
+3. NEVER show raw JSON or tool results directly to the user
+4. Synthesize the information from multiple sources into a coherent answer
+5. Cite your sources by mentioning page titles or URLs when relevant
+6. If the search doesn't find what you need, explain what you found and ask clarifying questions
+
+The user only sees your text responses - not tool results. Always provide a complete, natural language answer after using web_search."""
 
     # Configure human-in-the-loop for shell commands
     shell_interrupt_config: InterruptOnConfig = {
@@ -1224,17 +1395,22 @@ The filesystem backend is currently operating in: `{Path.cwd()}`"""
 
 def cli_main():
     """Entry point for console script."""
-    args = parse_args()
+    try:
+        args = parse_args()
 
-    if args.command == "help":
-        show_help()
-    elif args.command == "list":
-        list_agents()
-    elif args.command == "reset":
-        reset_agent(args.agent, args.source_agent)
-    else:
-        # API key validation happens in create_model()
-        asyncio.run(main(args.agent))
+        if args.command == "help":
+            show_help()
+        elif args.command == "list":
+            list_agents()
+        elif args.command == "reset":
+            reset_agent(args.agent, args.source_agent)
+        else:
+            # API key validation happens in create_model()
+            asyncio.run(main(args.agent))
+    except KeyboardInterrupt:
+        # Clean exit on Ctrl+C - suppress ugly traceback
+        console.print("\n\n[yellow]Interrupted[/yellow]")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
