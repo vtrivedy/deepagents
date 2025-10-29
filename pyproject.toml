@@ -29,6 +29,8 @@ cli = [
     "python-dotenv",
     "requests",
     "rich>=13.0.0",
+    "prompt-toolkit>=3.0.52",
+    "langchain-openai>=0.1.0",
 ]
 
 [dependency-groups]
