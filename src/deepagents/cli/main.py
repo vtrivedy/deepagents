@@ -92,26 +92,25 @@ def parse_args():
 
 async def simple_cli(agent, assistant_id: str | None, session_state):
     """Main CLI loop."""
-    console.clear()
     console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
-    console.print()
 
     if tavily_client is None:
         console.print(f"[yellow]⚠ Web search disabled:[/yellow] TAVILY_API_KEY not found.", style=COLORS["dim"])
         console.print(f"  To enable web search, set your Tavily API key:", style=COLORS["dim"])
         console.print(f"    export TAVILY_API_KEY=your_api_key_here", style=COLORS["dim"])
         console.print(f"  Or add it to your .env file. Get your key at: https://tavily.com", style=COLORS["dim"])
-        console.print()
 
     console.print("... Ready to code! What would you like to build?", style=COLORS["agent"])
+
+    # Display model info
+    model_name = session_state.model.model
+    console.print(f"  [dim]Model: {model_name}[/dim]")
     console.print(f"  [dim]Working directory: {Path.cwd()}[/dim]")
-    console.print()
 
     if session_state.auto_approve:
         console.print(
             "  [yellow]⚡ Auto-approve: ON[/yellow] [dim](tools run without confirmation)[/dim]"
         )
-        console.print()
 
     console.print(f"  Tips: Enter to submit, Alt+Enter for newline, Ctrl+E for editor, Ctrl+T to toggle auto-approve, Ctrl+C to interrupt", style=f"dim {COLORS['dim']}")
     console.print()
@@ -159,9 +158,12 @@ async def simple_cli(agent, assistant_id: str | None, session_state):
 
 async def main(assistant_id: str, session_state):
     """Main entry point."""
-
     # Create the model (checks API keys)
     model = create_model()
+    session_state.model = model
+
+    # Clear screen
+    console.clear()
 
     # Create agent with conditional tools
     tools = [http_request]
