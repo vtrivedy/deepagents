@@ -4,7 +4,7 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from .config import console, COLORS, DEEP_AGENTS_ASCII, create_model
+from .config import console, COLORS, DEEP_AGENTS_ASCII, create_model, SessionState
 from .tools import tavily_client, http_request, web_search
 from .ui import show_help, TokenTracker
 from .input import create_prompt_session
@@ -81,11 +81,16 @@ def parse_args():
         default="agent",
         help="Agent identifier for separate memory stores (default: agent).",
     )
+    parser.add_argument(
+        "--auto-approve",
+        action="store_true",
+        help="Auto-approve tool usage without prompting (disables human-in-the-loop)",
+    )
 
     return parser.parse_args()
 
 
-async def simple_cli(agent, assistant_id: str | None):
+async def simple_cli(agent, assistant_id: str | None, session_state):
     """Main CLI loop."""
     console.clear()
     console.print(DEEP_AGENTS_ASCII, style=f"bold {COLORS['primary']}")
@@ -101,11 +106,18 @@ async def simple_cli(agent, assistant_id: str | None):
     console.print("... Ready to code! What would you like to build?", style=COLORS["agent"])
     console.print(f"  [dim]Working directory: {Path.cwd()}[/dim]")
     console.print()
-    console.print(f"  Tips: Enter to submit, Alt+Enter for newline, Ctrl+E for editor, Ctrl+C to interrupt, /help for commands", style=f"dim {COLORS['dim']}")
+
+    if session_state.auto_approve:
+        console.print(
+            "  [yellow]⚡ Auto-approve: ON[/yellow] [dim](tools run without confirmation)[/dim]"
+        )
+        console.print()
+
+    console.print(f"  Tips: Enter to submit, Alt+Enter for newline, Ctrl+E for editor, Ctrl+T to toggle auto-approve, Ctrl+C to interrupt", style=f"dim {COLORS['dim']}")
     console.print()
 
     # Create prompt session and token tracker
-    session = create_prompt_session(assistant_id)
+    session = create_prompt_session(assistant_id, session_state)
     token_tracker = TokenTracker()
 
     while True:
@@ -142,10 +154,10 @@ async def simple_cli(agent, assistant_id: str | None):
             console.print(f"\nGoodbye!", style=COLORS["primary"])
             break
 
-        execute_task(user_input, agent, assistant_id, token_tracker)
+        execute_task(user_input, agent, assistant_id, session_state, token_tracker)
 
 
-async def main(assistant_id: str):
+async def main(assistant_id: str, session_state):
     """Main entry point."""
 
     # Create the model (checks API keys)
@@ -159,7 +171,7 @@ async def main(assistant_id: str):
     agent = create_agent_with_config(model, assistant_id, tools)
 
     try:
-        await simple_cli(agent, assistant_id)
+        await simple_cli(agent, assistant_id, session_state)
     except Exception as e:
         console.print(f"\n[bold red]❌ Error:[/bold red] {e}\n")
 
@@ -179,8 +191,11 @@ def cli_main():
         elif args.command == "reset":
             reset_agent(args.agent, args.source_agent)
         else:
+            # Create session state from args
+            session_state = SessionState(auto_approve=args.auto_approve)
+
             # API key validation happens in create_model()
-            asyncio.run(main(args.agent))
+            asyncio.run(main(args.agent, session_state))
     except KeyboardInterrupt:
         # Clean exit on Ctrl+C - suppress ugly traceback
         console.print("\n\n[yellow]Interrupted[/yellow]")

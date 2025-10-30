@@ -117,7 +117,7 @@ def prompt_for_shell_approval(action_request: dict) -> dict:
         return {"type": "reject", "message": "User rejected the command"}
 
 
-def execute_task(user_input: str, agent, assistant_id: str | None, token_tracker: TokenTracker | None = None):
+def execute_task(user_input: str, agent, assistant_id: str | None, session_state, token_tracker: TokenTracker | None = None):
     """Execute any task by passing it directly to the AI agent."""
     console.print()
 
@@ -202,21 +202,47 @@ def execute_task(user_input: str, agent, assistant_id: str | None, token_tracker
                             interrupt_obj = interrupt_data[0] if isinstance(interrupt_data, tuple) else interrupt_data
                             hitl_request = interrupt_obj.value if hasattr(interrupt_obj, 'value') else interrupt_obj
 
-                            # Stop spinner for approval prompt
-                            if spinner_active:
-                                status.stop()
-                                spinner_active = False
+                            # Check if auto-approve is enabled
+                            if session_state.auto_approve:
+                                # Auto-approve all commands without prompting
+                                decisions = []
+                                for action_request in hitl_request.get("action_requests", []):
+                                    # Show what's being auto-approved (brief, dim message)
+                                    if spinner_active:
+                                        status.stop()
+                                        spinner_active = False
 
-                            # Handle human-in-the-loop approval
-                            decisions = []
-                            for action_request in hitl_request.get("action_requests", []):
-                                decision = prompt_for_shell_approval(action_request)
-                                decisions.append(decision)
+                                    description = action_request.get('description', 'tool action')
+                                    console.print()
+                                    console.print(f"  [dim]⚡ {description}[/dim]")
 
-                            suppress_resumed_output = any(decision.get("type") == "reject" for decision in decisions)
-                            hitl_response = {"decisions": decisions}
-                            interrupt_occurred = True
-                            break
+                                    decisions.append({"type": "approve"})
+
+                                hitl_response = {"decisions": decisions}
+                                interrupt_occurred = True
+
+                                # Restart spinner for continuation
+                                if not spinner_active:
+                                    status.start()
+                                    spinner_active = True
+
+                                break
+                            else:
+                                # Normal HITL flow - stop spinner and prompt user
+                                if spinner_active:
+                                    status.stop()
+                                    spinner_active = False
+
+                                # Handle human-in-the-loop approval
+                                decisions = []
+                                for action_request in hitl_request.get("action_requests", []):
+                                    decision = prompt_for_shell_approval(action_request)
+                                    decisions.append(decision)
+
+                                suppress_resumed_output = any(decision.get("type") == "reject" for decision in decisions)
+                                hitl_response = {"decisions": decisions}
+                                interrupt_occurred = True
+                                break
 
                     # Extract chunk_data from updates for todo checking
                     chunk_data = list(data.values())[0] if data else None

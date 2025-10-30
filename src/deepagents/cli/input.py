@@ -11,7 +11,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.enums import EditingMode
 
-from .config import console, COLORS, COMMANDS, COMMON_BASH_COMMANDS
+from .config import console, COLORS, COMMANDS, COMMON_BASH_COMMANDS, SessionState
 
 
 class FilePathCompleter(Completer):
@@ -145,7 +145,19 @@ def parse_file_mentions(text: str) -> tuple[str, list[Path]]:
     return text, files
 
 
-def create_prompt_session(assistant_id: str) -> PromptSession:
+def get_bottom_toolbar(session_state: SessionState):
+    """Return toolbar function that shows auto-approve status."""
+    def toolbar():
+        if session_state.auto_approve:
+            # Green background when auto-approve is ON
+            return [('class:toolbar-green', 'auto-accept ON (CTRL+T to toggle)')]
+        else:
+            # Orange background when manual accept (auto-approve OFF)
+            return [('class:toolbar-orange', 'manual accept (CTRL+T to toggle)')]
+    return toolbar
+
+
+def create_prompt_session(assistant_id: str, session_state: SessionState) -> PromptSession:
     """Create a configured PromptSession with all features."""
 
     # Set default editor if not already set
@@ -154,6 +166,14 @@ def create_prompt_session(assistant_id: str) -> PromptSession:
 
     # Create key bindings
     kb = KeyBindings()
+
+    # Bind Ctrl+T to toggle auto-approve
+    @kb.add('c-t')
+    def _(event):
+        """Toggle auto-approve mode."""
+        session_state.toggle_auto_approve()
+        # Force UI refresh to update toolbar
+        event.app.invalidate()
 
     # Bind regular Enter to submit (intuitive behavior)
     @kb.add('enter')
@@ -201,6 +221,15 @@ def create_prompt_session(assistant_id: str) -> PromptSession:
     history_file = Path.home() / ".deepagents" / assistant_id / "history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
+    from prompt_toolkit.styles import Style
+
+    # Define styles for the toolbar with full-width background colors
+    toolbar_style = Style.from_dict({
+        'bottom-toolbar': 'noreverse',  # Disable default reverse video
+        'toolbar-green': 'bg:#10b981 #000000',  # Green for auto-accept ON
+        'toolbar-orange': 'bg:#f59e0b #000000',  # Orange for manual accept
+    })
+
     # Create the session
     session = PromptSession(
         message=HTML(f'<style fg="{COLORS["user"]}">></style> '),
@@ -212,6 +241,8 @@ def create_prompt_session(assistant_id: str) -> PromptSession:
         complete_while_typing=True,  # Show completions as you type
         mouse_support=False,
         enable_open_in_editor=True,  # Allow Ctrl+X Ctrl+E to open external editor
+        bottom_toolbar=get_bottom_toolbar(session_state),  # Persistent status bar at bottom
+        style=toolbar_style,  # Apply toolbar styling
     )
 
     return session
