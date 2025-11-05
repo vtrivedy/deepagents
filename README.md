@@ -80,6 +80,17 @@ See [examples/research/research_agent.py](examples/research/research_agent.py) f
 The agent created with `create_deep_agent` is just a LangGraph graph - so you can interact with it (streaming, human-in-the-loop, memory, studio)
 in the same way you would any LangGraph agent.
 
+## Features
+
+DeepAgents is a modular framework for building long-lived, planning-capable AI agents. It combines planning, context management, and extensible middleware so you can build agents that decompose tasks, quarantine context, and maintain persistent memory.
+
+### Main features
+
+- Planning & Task Decomposition — Built-in write_todos tool enables agents to break complex tasks into ordered steps and track progress.
+- Context Management — Filesystem tools (ls, read_file, write_file, edit_file, glob, grep) let agents offload large or variable-length results to disk to avoid context-window overflow.
+- Subagent Spawning — A task tool enables spawning specialized subagents for context isolation and focused subtasks.
+- Middleware-first Architecture — Compose and customize features (planning, filesystem, subagents, etc.) by adding or replacing middleware.
+
 ## Core Capabilities
 **Planning & Task Decomposition**
 
