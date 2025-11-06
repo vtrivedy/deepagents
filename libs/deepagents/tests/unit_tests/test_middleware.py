@@ -581,6 +581,77 @@ class TestFilesystemMiddleware:
         )
         assert "Invalid regex pattern" in result
 
+    # ---- New unit tests for backend grep helpers ----
+    def test_grep_matches_from_files_returns_structured_matches(self):
+        """Ensure grep_matches_from_files returns structured match dicts filtered by path and glob."""
+        from deepagents.backends.utils import grep_matches_from_files
+
+        files = {
+            "/src/a.py": {"content": ["import os", "print('ok')"], "created_at": "2021-01-01", "modified_at": "2021-01-01"},
+            "/src/b.txt": {"content": ["no match here"], "created_at": "2021-01-01", "modified_at": "2021-01-01"},
+            "/tests/test_a.py": {"content": ["import pytest"], "created_at": "2021-01-01", "modified_at": "2021-01-01"},
+        }
+
+        matches = grep_matches_from_files(files, r"import", path="/src")
+        assert isinstance(matches, list)
+        assert all(isinstance(m, dict) for m in matches)
+        # Only /src/a.py should match when path=/src
+        paths = {m["path"] for m in matches}
+        assert paths == {"/src/a.py"}
+        assert matches[0]["line"] == 1
+        assert "import os" in matches[0]["text"]
+
+    def test_grep_matches_from_files_invalid_regex_returns_error_string(self):
+        """Invalid regex should return an error string, not raise."""
+        from deepagents.backends.utils import grep_matches_from_files
+
+        files = {"/file.py": {"content": ["hello"], "created_at": "2021-01-01", "modified_at": "2021-01-01"}}
+        res = grep_matches_from_files(files, "[invalid")
+        assert isinstance(res, str)
+        assert "Invalid regex pattern" in res
+
+    def test_build_grep_results_dict_groups_correctly(self):
+        """build_grep_results_dict should group matches by path into tuples of (line, text)."""
+        from deepagents.backends.utils import build_grep_results_dict
+
+        structured = [
+            {"path": "/a.py", "line": 1, "text": "first"},
+            {"path": "/a.py", "line": 3, "text": "third"},
+            {"path": "/b.py", "line": 2, "text": "two"},
+        ]
+        grouped = build_grep_results_dict(structured)
+        assert set(grouped.keys()) == {"/a.py", "/b.py"}
+        assert grouped["/a.py"] == [(1, "first"), (3, "third")]
+        assert grouped["/b.py"] == [(2, "two")]
+
+    def test_format_grep_matches_formats_modes(self):
+        """format_grep_matches should render files_with_matches, content, and count modes correctly."""
+        from deepagents.backends.utils import format_grep_matches
+
+        matches = [
+            {"path": "/a.py", "line": 1, "text": "alpha"},
+            {"path": "/b.py", "line": 2, "text": "beta"},
+            {"path": "/a.py", "line": 3, "text": "gamma"},
+        ]
+
+        files_only = format_grep_matches(matches, "files_with_matches")
+        # Should list file paths (sorted)
+        assert "/a.py" in files_only
+        assert "/b.py" in files_only
+
+        count = format_grep_matches(matches, "count")
+        # Should contain counts per file
+        assert "/a.py:" in count and ("2" in count)
+        assert "/b.py:" in count and ("1" in count)
+
+        content = format_grep_matches(matches, "content")
+        # Should show file: then numbered lines
+        assert "/a.py:" in content
+        assert "  1: alpha" in content
+        assert "  3: gamma" in content
+
+    # ---- end new tests ----
+
     def test_search_store_paginated_empty(self):
         """Test pagination with no items."""
         store = InMemoryStore()
