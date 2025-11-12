@@ -1,0 +1,9 @@
+{
+  "name": "DeepAgents",
+  "version": "0.1",
+  "dependencies": {
+    "langchain": "*",
+    "tavily": "*"
+  },
+  "scripts": ["run", "test"]
+}
